@@ -1,0 +1,18 @@
+log_msg() {
+    _CMD_LOG="tee -a ${SCRIPT_LOG}/script_${TODAY}.log"
+    _TIMESTAMP=$(date "+%Y%m%d %H:%M:%S.%3N")
+  
+    _LOG_TYPE=$1
+    _LOG_MSG=$2
+
+    # printf "%-*s | %s\n" ${STR_LEGNTH} "Server Serial" "Unknown" |tee -a ${LOG_FILE} >/dev/null
+    case ${_LOG_TYPE} in
+        "CMD"   ) printf "[ ${BWhite}%-*s${ColorOff} ] %s %s\n"  5 "${_LOG_TYPE}" "[ ${_TIMESTAMP} ]" "${_LOG_MSG}" ;;
+        "OK"    ) printf "[ ${BGreen}%-*s${ColorOff} ] %s %s\n"  5 "${_LOG_TYPE}" "[ ${_TIMESTAMP} ]" "${_LOG_MSG}" ;;
+        "FAIL"  ) printf "[ ${BRed}%-*s${ColorOff} ] %s %s\n"    5 "${_LOG_TYPE}" "[ ${_TIMESTAMP} ]" "${_LOG_MSG}" ;;
+        "INFO"  ) printf "[ ${BWhite}%-*s${ColorOff} ] %s %s\n"  5 "${_LOG_TYPE}" "[ ${_TIMESTAMP} ]" "${_LOG_MSG}" ;;
+        "WARR"  ) printf "[ ${BPurple}%-*s${ColorOff} ] %s %s\n" 5 "${_LOG_TYPE}" "[ ${_TIMESTAMP} ]" "${_LOG_MSG}" ;;
+        "SKIP"  ) printf "[ ${BCyan}%-*s${ColorOff} ] %s %s\n"   5 "${_LOG_TYPE}" "[ ${_TIMESTAMP} ]" "${_LOG_MSG}" ;;
+        "ERROR" ) printf "[ ${BRed}%-*s${ColorOff} ] %s %s\n"    5 "${_LOG_TYPE}" "[ ${_TIMESTAMP} ]" "${_LOG_MSG}" ;;
+    esac
+}

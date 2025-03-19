@@ -1,0 +1,385 @@
+---
+- name: OS Hardenning for Ubuntu 22.04
+  hosts: all
+  gather_facts: false
+  become: true
+  become_method: sudo
+  vars:
+    GROUP_ID: 1000
+    GROUP_NAME: 'testgroup'
+    USER_ID: 1000
+    USER_NAME: 'testuser'
+    USER_PASS: 'testuser123'
+
+  tasks:
+  ### 해당 인벤토리에 작성한 Hostname이 존재하는지 확인
+  ### 해당 인벤토리 IP에 따라 공인과 사설을 나눠서 작업
+  - name: Check Input variable [Hostname]
+    set_fact:
+      check_host: "{{ check_hosts.split(',') }}"
+      check_host_ip: "{{ '.'.join(hostvars[inventory_hostname]['ansible_host'].split('.')[0:3]) }}"
+    run_once: true
+    delegate_to: 127.0.0.1
+
+  - debug:
+      msg: "{{ check_host_ip }}"
+
+  - set_fact:
+      SERVICE_IP: "{{ '192.168.1.1' if check_host_ip == '192.168.1' else '{{ SERVICE_IP }}' }}"
+      SERVICE_TYPE: "{{ 'pri' if check_host_ip == '192.168.1' else 'pub' }}"
+    delegate_to: 127.0.0.1
+  
+  - when: "'all' in check_host"
+    fail:
+      msg: "[all] cannot be entered in Hostname vars"
+    run_once: true
+    delegate_to: 127.0.0.1
+
+  ######################################################
+  ### 작업간 copy 모듈이 진행시 백업 파일명에 시간을 표시하기 위함
+  - shell: date +%Y%m%d_%H%M%S
+    register: date_format
+
+  ######################################################
+  ### 1. 호스트명 설정
+  - name: 1.Setting Hostname
+    hostname:
+      name: "{{ inventory_hostname }}"
+
+  ######################################################
+  ### 2. iptables, firewall, sendmail 서비스 중지
+  - name: 2. Service stop ufw, sendmail
+    systemd:
+      name: '{{ items }}'
+      enabled: false
+      state: stopped
+      masked: false
+    ignore_errors: yes
+    with_items:
+    - ufw
+    - sendmail
+
+  ######################################################
+  ### 3. NIC nameing 수정 (ethX)
+  - name: 3. Reanmeing NIC
+    shell: grep -q 'net.ifnames=0 biosdevname=0' /etc/default/grub
+    register: result
+    failed_when: result.rc not in [ 0, 1 ]
+  - copy:
+      src: /etc/default/grub
+      dest: /etc/default/grub.bk.{{ date_format.stdout }}
+      remote_src: yes
+    when: result.rc == 1
+  - replace:
+      path: /etc/default/grub
+      regexp: '^GRUB_CMDLINE_LINUX='
+      replace: '#GRUB_CMDLINE_LINUX='
+    when: result.rc == 1
+  - lineinfile:
+      path: /etc/default/grub
+      insertafter: '^#GRUB_CMDLINE_LINUX='
+      line: GRUB_CMDLINE_LINUX="net.ifnames=0 biosdevname=0"
+    when: result.rc == 1
+  - shell: update-grub
+    when: result.rc == 1
+
+  ######################################################
+  ### 4. 그룹 및 유저 생성
+  - name: 4. Create group/user [ {{ GROUP_NAME }} / {{ USER_NAME }} ]
+    group:
+      name: '{{ GROUP_NAME }}'
+      gid: '{{ GROUP_ID }}'
+      state: present
+  - user:
+      name: '{{ USER_NAME }}'
+      uid: '{{ USER_ID }}'
+      group: '{{ GROUP_NAME }}'
+      shell: /bin/bash
+      password: "{{ USER_PASS | password_hash('sha512','A512') }}"
+      password_expire_max: 99999
+      state: present
+
+  ######################################################
+  ### 5. 필요 패키지 설치
+  - name: 5. Install packages
+    shell: grep 'mirror.kakao.com' /etc/apt/sources.list
+    register: result
+    failed_when: result.rc not in [ 0, 1 ]
+  - copy:
+      src: /etc/apt/sources.list
+      dest: /etc/apt/sources.list.bk.{{ date_format.stdout }}
+      remote_src: yes
+    when: result.rc == 1
+  - replace:
+      path: /etc/apt/sources.list
+      regexp: 'archive.ubuntu.com'
+      replace: 'mirror.kakao.com'
+    when: result.rc == 1
+  - apt:
+      update_cache: yes
+  - apt:
+      pkg: "{{ items }}"
+      state: present
+    with_items:
+    - net-tools
+    - ntp
+    - rdate
+    - vim
+    - quota
+    - ftp
+    - lynx
+    - libpcap*
+    - autoconf
+    - geoip-bin
+    - libcap*
+    - wget
+    - sysstat
+    - psmisc
+    - sendmail*
+    - vsftpd
+    - telnet
+    - rsync
+    - zip
+    - unzip
+    - tcpdump
+
+  ######################################################
+  ### 6. 자동 패키지 업데이트 비활성화
+  - name: 6. Disable auto update packages 
+    replace:
+      path: /etc/apt/apt.conf.d/20auto-upgrades
+      regexp: 'APT::Periodic::Update-Package-Lists "1";'
+      replace: 'APT::Periodic::Update-Package-Lists "0";'
+      backup: true
+  - replace:
+      path: /etc/apt/apt.conf.d/20auto-upgrades
+      regexp: 'APT::Periodic::Unattended-Upgrade "1";'
+      replace: 'APT::Periodic::Unattended-Upgrade "0";'
+
+  - replace:
+      path: /etc/apt/apt.conf.d/10periodic
+      regexp: 'APT::Periodic::Update-Package-Lists "1";'
+      replace: 'APT::Periodic::Update-Package-Lists "0";'
+      backup: true
+  - replace:
+      path: /etc/apt/apt.conf.d/10periodic
+      regexp: 'APT::Periodic::Download-Upgradeable-Packages "1";'
+      replace: 'APT::Periodic::Download-Upgradeable-Packages "0";'
+  - replace:
+      path: /etc/apt/apt.conf.d/10periodic
+      regexp: 'APT::Periodic::AutocleanInterval "1";'
+      replace: 'APT::Periodic::AutocleanInterval "0";'
+
+  ######################################################
+  ### 7. /etc/sysctl.conf 설정
+  - name: 7. Setup config /etc/sysctl.conf
+    shell: sysctl kernel.panic |grep 'kernel.panic = 1'
+    register: result
+    failed_when: result.rc not in [ 0, 1 ]
+  - copy:
+      src: /etc/sysctl.conf
+      dest: /etc/sysctl.conf.bk.{{ date_format.stdout }}
+      remote_src: yes
+    when: result.rc == 1
+  - copy:
+      dest: /etc/sysctl.conf
+      content: |
+        kernel.panic = 1
+        kernel.msgmni = 512
+        kernel.sem = 250 256000 32 1024
+        net.core.netdev_max_backlog = 2000
+        net.ipv4.tcp_max_syn_backlog = 2048
+        net.ipv4.tcp_keepalive_time = 3600
+        net.ipv4.tcp_fin_timeout = 30
+        net.ipv4.ip_local_port_range = 16384 61000
+        net.ipv4.tcp_max_tw_buckets = 500000
+        vm.swappiness = 1
+        net.ipv6.conf.all.disable_ipv6 = 1
+        net.ipv6.conf.default.disable_ipv6 = 1
+        net.ipv6.conf.lo.disable_ipv6 = 1
+    when: result.rc == 1
+  - command:
+      cmd: sysctl -p
+    when: result.rc == 1
+    ignore_errors: yes
+
+  ######################################################
+  ### 8-1. /etc/logrotate.d 로그 파일 추가
+  - name: 8-1. Add file /etc/logrotate.d
+    stat:
+      path: /etc/logrotate.d/shell_cmd.log
+    register: file_result
+  - shell: "rsync -avrP {{ SERVICE_IP }}::PKGS/shell_cmd.log /etc/logrotate.d/shell_cmd.log"
+    when: file_result.stat.exists == false
+
+  ### 8-2. /etc/logrotate 설정
+  - name: 8-2. Setup config /etc/logrotate.conf
+    shell: grep '^rotate 14' /etc/logrotate.conf
+    register: result
+    failed_when: result.rc not in [ 0, 1 ]
+  - copy:
+      src: /etc/logrotate.conf
+      dest: /etc/logrotate.conf.bk.{{ date_format.stdout }}
+      remote_src: yes
+    when: result.rc == 1
+  - replace:
+      path: /etc/logrotate.conf
+      regexp: '^rotate 4'
+      replace: 'rotate 14'
+    when: result.rc == 1
+  - shell: grep '^weekly' /etc/logrotate.conf
+    register: result
+    failed_when: result.rc not in [ 0, 1 ]
+  - replace:
+      path: /etc/logrotate.conf
+      regexp: '^weekly'
+      replace: 'daily'
+    when: result.rc == 1
+
+  ######################################################
+  ### 9. /etc/rsyslog.conf 설정
+  - name: 9. Setup config /etc/rsyslog.conf
+    shell: grep 'sftp-server.log' /etc/logrotate.conf
+    register: result1
+    failed_when: result1.rc not in [ 0, 1 ]
+  - shell: grep 'shell_cmd.log' /etc/rsyslog.conf
+    register: result2
+    failed_when: result2.rc not in [ 0, 1 ]
+  - copy:
+      src: /etc/rsyslog.conf
+      dest: /etc/rsyslog.conf.bk.{{ date_format.stdout }}
+      remote_src: yes
+    when: result1.rc == 1 and result2.rc == 1
+  - blockinfile:
+      path: /etc/rsyslog.conf
+      marker: ""
+      block: |
+        ##### Custom options
+        # Custom messages
+        *.info;mail.none;authpriv.none;cron.none;local2.none;local3.none                            /var/log/messages
+
+        # shell_cmd log
+        local3.*        /var/log/shell_cmd.log
+    when: result1.rc == 1 and result2.rc == 1
+  - name: Systemctl restart rsyslog
+    systemd:
+      name: rsyslog
+      enabled: true
+      state: restarted
+    ignore_errors: yes
+
+  ######################################################
+  ### 10. rc-local 설정
+  - name: 10. Setup config /usr/lib/systemd/system/rc-local.service
+    shell: grep '^WantedBy=multi-user.target' /usr/lib/systemd/system/rc-local.service
+    register: result
+    failed_when: result.rc not in [ 0, 1 ]
+  - copy:
+      src: /usr/lib/systemd/system/rc-local.service
+      dest: /usr/lib/systemd/system/rc-local.service.bk.{{ date_format.stdout }}
+      remote_src: yes
+    when: result.rc == 1
+  - lineinfile:
+      path: /usr/lib/systemd/system/rc-local.service
+      line: |
+        ##### Custom options
+        [Install]
+        WantedBy=multi-user.target
+    when: result.rc == 1
+  - file:
+      path: /usr/lib/systemd/system/rc-local.service
+      mode: 0744
+  - systemd_service:
+      name: rc-local
+      state: restarted
+      daemon_reload: true
+
+  ######################################################
+  ### 11. /etc/profile 설정
+  - name: 11. Setup config /etc/profile
+    shell: grep '##### Custom options' /etc/profile
+    register: result
+    failed_when: result.rc not in [ 0, 1 ]
+  - lineinfile:
+      path: /etc/profile
+      line: |
+        ##### Custom options
+        export HISTFILESIZE=0
+        export HISTSIZE=500
+        HISTTIMEFORMAT="%Y-%m-%d %H:%M:%S "
+        export HISTTIMEFORMAT
+        TMOUT=3600
+    when: result.rc == 1
+  - shell: source /etc/profile
+
+  ######################################################
+  ### 12. ISMS, CSAP 기본 조치
+  - name: 12. Setup files by ISMS, CSAP
+    ile:
+      path: /usr/bin/su
+      owner: root
+      group: "{{ GROUP_NAME }}"
+      mode: '4750'
+  - file:
+      path: /etc/login.defs
+      mode: '0600'
+  - file:
+      path: /etc/default/grub
+      mode: '0600'
+      attr: +i
+  - file:
+      dest: /usr/bin/who
+      mode: 0751
+  - file:
+      dest: /proc
+      owner: root
+      group: '{{ GROUP_NAME }}'
+      mode: 0555
+
+  ######################################################
+  ### 13. /etc/vimrc 설정
+  - name: 13. Setup config /etc/vimrc
+    shell: grep 'set encoding=utf-8' /etc/vimrc
+    register: result
+    failed_when: result.rc not in [ 0, 1 ]
+  - copy:
+      src: /etc/default/grub
+      dest: /etc/default/grub.bk.{{ date_format.stdout }}
+      remote_src: yes
+    when: result.rc == 1
+  - lineinfile:
+      path: /etc/vimrc
+      line: |
+        set encoding=utf-8
+        set fileencodings=utf-8,cp949
+    when: result.rc == 1
+
+  ######################################################
+  ### 14. NTP 설정
+  - name: 14. Setup config NTP
+    shell: timedatectl set-timezone Asia/Seoul
+  - shell: grep -q '^#pool [0-3].ubuntu.pool.ntp.org iburst' /etc/ntp.conf
+    register: result
+    ignore_errors: yes
+    failed_when: result.rc not in [ 0, 1 ]
+  - copy:
+      src: /etc/ntp.conf
+      dest: /etc/ntp.conf.bk.{{ date_format.stdout }}
+      remote_src: yes
+    when: result.rc == 1
+  - replace:
+      path: /etc/ntp.conf
+      regexp: '{{ item }}'
+      replace: '#\g<0>'
+    when: result.rc == 1
+    with_items:
+    - '^pool [0-9].ubuntu.pool.ntp.org iburst'
+    - '^pool ntp.ubuntu.com'
+  - systemd:
+      name: ntp
+      enabled: true
+      state: restarted
+  - lineinfile:
+      path: /etc/crontab
+      regexp: 'time.bora.net.* hwclock -s'
+      line: '10 3 * * * root rdate -s time.bora.net && hwclock -s'
